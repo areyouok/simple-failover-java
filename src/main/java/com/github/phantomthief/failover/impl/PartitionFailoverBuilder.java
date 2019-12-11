@@ -1,10 +1,6 @@
 package com.github.phantomthief.failover.impl;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkNotNull;
-import static com.google.common.base.Preconditions.checkState;
-import static java.util.function.Function.identity;
-import static java.util.stream.Collectors.toMap;
 
 import java.util.Collection;
 import java.util.Map;
@@ -24,41 +20,51 @@ public class PartitionFailoverBuilder<T> {
     private WeightFailoverBuilder<T> weightFailoverBuilder = new WeightFailoverBuilder<>();
 
     @SuppressWarnings("checkstyle:VisibilityModifier")
-    int corePartitionSize = 3;
+    int corePartitionSize = 0;
 
     @SuppressWarnings("checkstyle:VisibilityModifier")
     long maxExternalPoolIdleMillis;
 
-
     @Nonnull
     public PartitionFailover<T> build(Collection<T> original) {
-        return build(original, WeightFailoverBuilder.DEFAULT_INIT_WEIGHT);
+        ensure();
+        WeightFailover<T> weightFailover = weightFailoverBuilder.build(original);
+        return new PartitionFailover<>(this, weightFailover);
     }
 
     @Nonnull
     public PartitionFailover<T> build(Collection<T> original, int initWeight) {
-        checkNotNull(original);
-        checkState(original.size() > 0, "original size should greater than zero");
-        checkArgument(initWeight > 0);
-        return build(original.stream().collect(toMap(identity(), i -> initWeight, (u, v) -> u)));
+        ensure();
+        WeightFailover<T> weightFailover = weightFailoverBuilder.build(original, initWeight);
+        return new PartitionFailover<>(this, weightFailover);
     }
 
     @Nonnull
     public PartitionFailover<T> build(Map<T, Integer> original) {
-        checkState(corePartitionSize <= original.size(), "illegal corePoolSize " + corePartitionSize);
+        ensure();
+        checkArgument(corePartitionSize <= original.size(), "illegal coreSize: " + corePartitionSize);
         WeightFailover<T> weightFailover = weightFailoverBuilder.build(original);
-        return new PartitionFailover<>(this, weightFailover, original);
+        return new PartitionFailover<>(this, weightFailover);
     }
 
-    @SuppressWarnings("checkstyle:HiddenField")
-    public PartitionFailoverBuilder<T> corePartitionSize(int corePartitionSize) {
-        this.corePartitionSize = corePartitionSize;
+    private void ensure() {
+        checkArgument(corePartitionSize > 0, "corePartitionSize has to be positive");
+        checkArgument(maxExternalPoolIdleMillis > 0, "maxExternalPoolIdleMillis has to be positive");
+    }
+
+    @CheckReturnValue
+    @Nonnull
+    public PartitionFailoverBuilder<T> corePartitionSize(int size) {
+        checkArgument(size > 0, "corePartitionSize has to be positive");
+        this.corePartitionSize = size;
         return this;
     }
 
-    @SuppressWarnings("checkstyle:HiddenField")
-    public PartitionFailoverBuilder<T> externalPool(long maxExternalPoolIdleMillis) {
-        this.maxExternalPoolIdleMillis = maxExternalPoolIdleMillis;
+    @CheckReturnValue
+    @Nonnull
+    public PartitionFailoverBuilder<T> externalPool(long millis) {
+        checkArgument(millis > 0, "maxExternalPoolIdleMillis has to be positive");
+        this.maxExternalPoolIdleMillis = millis;
         return this;
     }
 
@@ -143,8 +149,8 @@ public class PartitionFailoverBuilder<T> {
 
     @CheckReturnValue
     @Nonnull
-    public PartitionFailoverBuilder<T>
-            checker(@Nonnull ThrowableFunction<? super T, Double, Throwable> failChecker) {
+    public PartitionFailoverBuilder<T> checker(
+            @Nonnull ThrowableFunction<? super T, Double, Throwable> failChecker) {
         weightFailoverBuilder.checker(failChecker);
         return this;
     }

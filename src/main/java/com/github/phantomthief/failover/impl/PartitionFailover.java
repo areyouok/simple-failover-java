@@ -1,14 +1,17 @@
 package com.github.phantomthief.failover.impl;
 
+import static java.util.Comparator.comparingLong;
+import static java.util.stream.Collectors.collectingAndThen;
+import static java.util.stream.Collectors.toList;
+
 import java.io.Closeable;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -21,67 +24,62 @@ import com.github.phantomthief.failover.Failover;
  */
 public class PartitionFailover<T> implements Failover<T>, Closeable {
 
-    private final Map<T, Integer> initWeightMap;
     private final WeightFailover<T> weightFailover;
-    private final int corePartitionSize;
     private final long maxExternalPoolIdleMillis;
 
-    private volatile ResEntry<T>[] resources;
+    private volatile List<ResEntry<T>> resources;
 
+    @SuppressWarnings("checkstyle:VisibilityModifier")
     private static class ResEntry<T> {
+
+        final T object;
+        final int initWeight;
+        final AtomicInteger concurrency;
+        volatile long lastReturnTime;
+
+        ResEntry(T object, int initWeight) {
+            this(object, initWeight, 0);
+        }
+
         ResEntry(T object, int initWeight, int initConcurrency) {
             this.object = object;
             this.initWeight = initWeight;
             this.concurrency = new AtomicInteger(initConcurrency);
         }
 
-        @SuppressWarnings("checkstyle:VisibilityModifier")
-        final T object;
-        @SuppressWarnings("checkstyle:VisibilityModifier")
-        final int initWeight;
-
-        @SuppressWarnings("checkstyle:VisibilityModifier")
-        volatile long lastReturnTime;
-        @SuppressWarnings("checkstyle:VisibilityModifier")
-        AtomicInteger concurrency;
-
     }
 
     private static class ResEntryEx<T> extends ResEntry<T> {
-        @SuppressWarnings("checkstyle:VisibilityModifier")
-        double scoreWeight;
+
+        private int scoreWeight;
+
+        ResEntryEx(T object, int initWeight) {
+            super(object, initWeight);
+        }
 
         ResEntryEx(T object, int initWeight, int initConcurrency) {
             super(object, initWeight, initConcurrency);
         }
+
     }
 
     PartitionFailover(PartitionFailoverBuilder<T> partitionFailoverBuilder,
-            WeightFailover<T> weightFailover, Map<T, Integer> initWeightMap) {
+            WeightFailover<T> weightFailover) {
         this.weightFailover = weightFailover;
-        this.initWeightMap = initWeightMap;
-        this.corePartitionSize = partitionFailoverBuilder.corePartitionSize;
         this.maxExternalPoolIdleMillis = partitionFailoverBuilder.maxExternalPoolIdleMillis;
-        resources = new ResEntry[corePartitionSize];
-
-        List<T> list = new ArrayList<>();
-        for (int i = 0; i < corePartitionSize; i++) {
-            T one = weightFailover.getOneAvailableExclude(list);
-            list.add(one);
-            resources[i] = new ResEntry<>(one, initWeightMap.get(one), 0);
-        }
+        this.resources = weightFailover.getAvailable(partitionFailoverBuilder.corePartitionSize).stream()
+                .map(instance -> new ResEntry<>(instance, weightFailover.initWeight(instance)))
+                .collect(toList());
     }
 
-    private ResEntryEx<T>[] deepCopyResource() {
-        ResEntry<T>[] refCopy = resources;
-        ResEntryEx[] copy = new ResEntryEx[refCopy.length];
-        for (int i = 0; i < refCopy.length; i++) {
-            ResEntry<T> res = refCopy[i];
-            ResEntryEx<T> resEx = new ResEntryEx<>(res.object, res.initWeight, res.concurrency.get());
-            resEx.lastReturnTime = res.lastReturnTime;
-            copy[i] = resEx;
-        }
-        return copy;
+    private List<ResEntryEx<T>> deepCopyResource() {
+        return resources.stream()
+                .map(res -> {
+                    ResEntryEx<T> ex = new ResEntryEx<>(res.object, res.initWeight, res.concurrency.get());
+                    ex.lastReturnTime = res.lastReturnTime;
+                    return ex;
+                })
+                .collect(toList());
     }
 
     @Override
@@ -112,9 +110,9 @@ public class PartitionFailover<T> implements Failover<T>, Closeable {
     }
 
     @Nullable
-    private ResEntry lookup(Object object) {
-        ResEntry<T>[] refCopy = resources;
-        for (ResEntry res : refCopy) {
+    private ResEntry<T> lookup(T object) {
+        List<ResEntry<T>> refCopy = resources;
+        for (ResEntry<T> res : refCopy) {
             if (res.object == object) {
                 return res;
             }
@@ -123,16 +121,16 @@ public class PartitionFailover<T> implements Failover<T>, Closeable {
     }
 
     private void subtractConcurrency(@Nonnull T object) {
-        ResEntry resEntry = lookup(object);
+        ResEntry<T> resEntry = lookup(object);
         if (resEntry == null) {
             return;
         }
         resEntry.lastReturnTime = System.currentTimeMillis();
-        resEntry.concurrency.updateAndGet(oldValue -> oldValue - 1 < 0 ? 0 : oldValue - 1);
+        resEntry.concurrency.updateAndGet(oldValue -> Math.max(oldValue - 1, 0));
     }
 
     private void addConcurrency(@Nonnull T object) {
-        ResEntry resEntry = lookup(object);
+        ResEntry<T> resEntry = lookup(object);
         if (resEntry == null) {
             return;
         }
@@ -142,16 +140,16 @@ public class PartitionFailover<T> implements Failover<T>, Closeable {
 
     // weak consistency
     private void replaceDownResource(T object) {
-        ResEntry<T>[] resourceRefCopy = resources;
-        if (resourceRefCopy.length == initWeightMap.size()) {
+        List<ResEntry<T>> resourceRefCopy = resources;
+        if (resourceRefCopy.size() == weightFailover.getAll().size()) {
             // so there is no more resource in weightFailover
             return;
         }
-        ResEntry<T>[] newList = new ResEntry[resourceRefCopy.length];
+        List<ResEntry<T>> newList = new ArrayList<>(resourceRefCopy.size());
         int index = -1;
-        for (int i = 0; i < resourceRefCopy.length; i++) {
-            newList[i] = resourceRefCopy[i];
-            if (newList[i].object == object) {
+        for (int i = 0; i < resourceRefCopy.size(); i++) {
+            newList.set(i, resourceRefCopy.get(i));
+            if (newList.get(i).object == object) {
                 index = i;
             }
         }
@@ -159,13 +157,13 @@ public class PartitionFailover<T> implements Failover<T>, Closeable {
             // maybe replaced by another thread
             return;
         }
-        List<T> excludes = Stream.of(resourceRefCopy).map(r -> r.object).collect(Collectors.toList());
+        List<T> excludes = resourceRefCopy.stream().map(r -> r.object).collect(toList());
         T newOne = weightFailover.getOneAvailableExclude(excludes);
         if (newOne == null) {
             //no more available
             return;
         }
-        newList[index] = new ResEntry<>(newOne, initWeightMap.get(newOne), 0);
+        newList.set(index, new ResEntry<>(newOne, weightFailover.initWeight(newOne)));
         resources = newList;
     }
 
@@ -180,7 +178,7 @@ public class PartitionFailover<T> implements Failover<T>, Closeable {
         boolean allResIsHealthy = true;
         boolean hasRecentReturnedCall = false;
         long now = System.currentTimeMillis();
-        ResEntryEx<T>[] resourcesCopy = deepCopyResource();
+        List<ResEntryEx<T>> resourcesCopy = deepCopyResource();
         for (ResEntryEx<T> res : resourcesCopy) {
             int currentWeight = weightFailover.currentWeight(res.object);
             res.scoreWeight = currentWeight / (res.concurrency.get() + 1);
@@ -208,26 +206,30 @@ public class PartitionFailover<T> implements Failover<T>, Closeable {
         return one;
     }
 
-    private static <T> T selectRecentOne(ResEntryEx<T>[] resourcesCopy) {
-        return Stream.of(resourcesCopy).max((r1, r2) -> {
-            if (r1.lastReturnTime == r2.lastReturnTime) {
-                return 0;
-            } else if (r1.lastReturnTime < r2.lastReturnTime) {
-                return -1;
-            } else {
-                return 1;
-            }
-        }).get().object;
+    /**
+     * FIXME 待实现
+     */
+    @Nullable
+    @Override
+    public T getOneAvailableExclude(Collection<T> exclusions) {
+        return null;
     }
 
-    private static <T> T selectByScore(ResEntryEx<T>[] resourcesCopy) {
-        double sumOfScore = Stream.of(resourcesCopy).mapToDouble(r -> r.scoreWeight).sum();
+    private static <T> T selectRecentOne(List<ResEntryEx<T>> resourcesCopy) {
+        return resourcesCopy.stream()
+                .max(comparingLong(r -> r.lastReturnTime))
+                .orElse(resourcesCopy.get(0))
+                .object;
+    }
+
+    private static <T> T selectByScore(List<ResEntryEx<T>> resourcesCopy) {
+        int sumOfScore = resourcesCopy.stream().mapToInt(r -> r.scoreWeight).sum();
         if (sumOfScore <= 0) {
             // all down
             return null;
         }
-        double selectValue = ThreadLocalRandom.current().nextDouble(sumOfScore);
-        double x = 0;
+        int selectValue = ThreadLocalRandom.current().nextInt(sumOfScore);
+        int x = 0;
         for (ResEntryEx<T> res : resourcesCopy) {
             x += res.scoreWeight;
             if (selectValue < x) {
@@ -235,15 +237,16 @@ public class PartitionFailover<T> implements Failover<T>, Closeable {
             }
         }
         // something wrong or there are float precision problem
-        return resourcesCopy[0].object;
+        return resourcesCopy.get(0).object;
     }
 
     @Override
     public List<T> getAvailable() {
-        return Stream.of(resources)
-                .filter(r -> weightFailover.currentWeight(r.object) > 0)
+        List<T> available = weightFailover.getAvailable();
+        return resources.stream()
                 .map(r -> r.object)
-                .collect(Collectors.toList());
+                .filter(available::contains)
+                .collect(collectingAndThen(toList(), Collections::unmodifiableList));
     }
 
     @Override
@@ -261,4 +264,5 @@ public class PartitionFailover<T> implements Failover<T>, Closeable {
         // we don't know which resource is used, so this method is not supported
         throw new UnsupportedOperationException();
     }
+
 }

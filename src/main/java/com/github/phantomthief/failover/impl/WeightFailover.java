@@ -9,12 +9,14 @@ import static java.lang.Math.min;
 import static java.util.Collections.emptySet;
 import static java.util.Collections.unmodifiableList;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.stream.Collectors.collectingAndThen;
 import static java.util.stream.Collectors.toSet;
 import static org.slf4j.LoggerFactory.getLogger;
 
 import java.io.Closeable;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
@@ -343,6 +345,10 @@ public class WeightFailover<T> implements Failover<T>, Closeable {
                 .filter(entry -> entry.getValue() == 0)
                 .map(Entry::getKey)
                 .collect(toSet());
+    }
+
+    int initWeight(T obj) {
+        return initWeightMap.get(obj);
     }
 
     int currentWeight(T obj) {

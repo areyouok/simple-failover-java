@@ -2,6 +2,7 @@ package com.github.phantomthief.failover.impl;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static java.util.function.Function.identity;
 import static java.util.stream.Collectors.toMap;
@@ -44,7 +45,7 @@ public class WeightFailoverBuilder<T> {
     int minWeight = 0;
     Integer weightOnMissingNode;
     String name;
-    
+
     Predicate<T> filter;
 
     @CheckReturnValue
@@ -147,8 +148,8 @@ public class WeightFailoverBuilder<T> {
     @SuppressWarnings("unchecked")
     @CheckReturnValue
     @Nonnull
-    public <E> WeightFailoverBuilder<E>
-            checker(@Nonnull ThrowableFunction<? super E, Double, Throwable> failChecker) {
+    public <E> WeightFailoverBuilder<E> checker(
+            @Nonnull ThrowableFunction<? super E, Double, Throwable> failChecker) {
         checkNotNull(failChecker);
         WeightFailoverBuilder<E> thisBuilder = (WeightFailoverBuilder<E>) this;
         thisBuilder.checker = t -> {
@@ -181,6 +182,7 @@ public class WeightFailoverBuilder<T> {
     @Nonnull
     public <E> WeightFailover<E> build(Collection<? extends E> original, int initWeight) {
         checkNotNull(original);
+        checkState(original.size() > 0, "original size should greater than zero");
         checkArgument(initWeight > 0);
         return build(original.stream().collect(toMap(identity(), i -> initWeight, (u, v) -> u)));
     }
