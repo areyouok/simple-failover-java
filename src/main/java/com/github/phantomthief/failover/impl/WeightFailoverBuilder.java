@@ -28,7 +28,7 @@ public class WeightFailoverBuilder<T> {
 
     private static final Logger logger = getLogger(WeightFailoverBuilder.class);
 
-    private static final int DEFAULT_INIT_WEIGHT = 100;
+    static final int DEFAULT_INIT_WEIGHT = 100;
     private static final int DEFAULT_FAIL_REDUCE_WEIGHT = 5;
     private static final int DEFAULT_SUCCESS_INCREASE_WEIGHT = 1;
     private static final long DEFAULT_CHECK_DURATION = SECONDS.toMillis(1);
